@@ -46,6 +46,11 @@ function yesterdayStr() {
   d.setDate(d.getDate() - 1);
   return d.toISOString().slice(0, 10);
 }
+function shiftDate(dateStr, delta) {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + delta);
+  return d.toISOString().slice(0, 10);
+}
 function monthKey(d) {
   return d.slice(0, 7);
 }
@@ -58,6 +63,10 @@ function monthLabel(ym) {
   const [y, m] = ym.split("-").map(Number);
   const d = new Date(y, m - 1, 1);
   return d.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+}
+function daysInMonth(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
 }
 function dayLabel(dateStr) {
   const d = new Date(dateStr + "T00:00:00");
@@ -75,9 +84,12 @@ export default function App() {
   });
   const [currentUser, setCurrentUser] = useState(() => localStorage.getItem(SESSION_KEY) || null);
   const [authMode, setAuthMode] = useState("login");
+  const [nameInput, setNameInput] = useState("");
   const [usernameInput, setUsernameInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
+  const [confirmPasswordInput, setConfirmPasswordInput] = useState("");
   const [authError, setAuthError] = useState("");
+  const [authSuccess, setAuthSuccess] = useState("");
 
   // --- GLOBAL UI ---
   const [darkMode, setDarkMode] = useState(true);
@@ -111,6 +123,8 @@ export default function App() {
 
   // --- BUDGET ---
   const [budgetMonth, setBudgetMonth] = useState(monthKey(todayStr()));
+  const [budgetView, setBudgetView] = useState("Month"); // Month | Day
+  const [budgetDay, setBudgetDay] = useState(todayStr());
   const [moneyModalAccount, setMoneyModalAccount] = useState(null);
   const [moneyAmount, setMoneyAmount] = useState("");
   const [moneyLabel, setMoneyLabel] = useState("");
@@ -189,18 +203,25 @@ export default function App() {
   function handleAuth(e) {
     e.preventDefault();
     setAuthError("");
+    setAuthSuccess("");
     const u = usernameInput.trim().toLowerCase();
-    if (!u || !passwordInput) { setAuthError("Please fill out all fields."); return; }
     if (authMode === "register") {
+      const name = nameInput.trim();
+      if (!name || !u || !passwordInput || !confirmPasswordInput) { setAuthError("Please fill out all fields."); return; }
+      if (passwordInput !== confirmPasswordInput) { setAuthError("Passwords do not match."); return; }
       if (usersRegistry[u]) { setAuthError("This User ID already exists."); return; }
-      const next = { ...usersRegistry, [u]: passwordInput };
+      const next = { ...usersRegistry, [u]: { password: passwordInput, name } };
       setUsersRegistry(next);
       localStorage.setItem(AUTH_USERS_KEY, JSON.stringify(next));
-      localStorage.setItem(SESSION_KEY, u);
-      setCurrentUser(u);
-      setUsernameInput(""); setPasswordInput("");
+      setNameInput(""); setPasswordInput(""); setConfirmPasswordInput("");
+      setAuthMode("login");
+      setUsernameInput(u);
+      setAuthSuccess("Account created! Log in to continue.");
     } else {
-      if (usersRegistry[u] && usersRegistry[u] === passwordInput) {
+      if (!u || !passwordInput) { setAuthError("Please fill out all fields."); return; }
+      const record = usersRegistry[u];
+      const storedPassword = typeof record === "string" ? record : record?.password;
+      if (record && storedPassword === passwordInput) {
         localStorage.setItem(SESSION_KEY, u);
         setCurrentUser(u);
         setUsernameInput(""); setPasswordInput("");
@@ -208,6 +229,11 @@ export default function App() {
         setAuthError("Invalid User ID or Password.");
       }
     }
+  }
+  function currentUserName() {
+    const record = usersRegistry[currentUser];
+    if (record && typeof record === "object" && record.name) return record.name;
+    return currentUser;
   }
   function handleSignOut() {
     localStorage.removeItem(SESSION_KEY);
@@ -351,6 +377,25 @@ export default function App() {
     return { received, spent, balance: received - spent, progress: received > 0 ? Math.min(100, (spent / received) * 100) : (spent > 0 ? 100 : 0) };
   }
 
+  // --- DERIVED: DAY-WISE BUDGET DASHBOARD ---
+  const dayMonthKey = monthKey(budgetDay);
+  const dayCount = daysInMonth(dayMonthKey);
+  const dayEntries = useMemo(() => entries.filter((e) => e.date === budgetDay), [entries, budgetDay]);
+  const daySpentTotal = useMemo(() => dayEntries.reduce((s, e) => s + e.amount, 0), [dayEntries]);
+  const dayCatBreakdown = useMemo(() => {
+    const map = {};
+    dayEntries.forEach((e) => (map[e.category] = (map[e.category] || 0) + e.amount));
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  }, [dayEntries]);
+  function dayAccountStats(account) {
+    const goal = accountGoals[account] || 0;
+    const dailyAllowance = goal / dayCount;
+    const spent = dayEntries.filter((e) => e.account === account).reduce((s, e) => s + e.amount, 0);
+    return { dailyAllowance, spent, pending: dailyAllowance - spent };
+  }
+  const dayCombinedAllowance = ((accountGoals.Cash || 0) + (accountGoals.Online || 0)) / dayCount;
+  const dayCombinedPending = dayCombinedAllowance - daySpentTotal;
+
   // --- DERIVED: CREDIT ---
   const toGet = useMemo(() => credits.filter((c) => c.type === "lent" && !c.settled).reduce((s, c) => s + c.amount, 0), [credits]);
   const toPay = useMemo(() => credits.filter((c) => c.type === "borrowed" && !c.settled).reduce((s, c) => s + c.amount, 0), [credits]);
@@ -367,7 +412,14 @@ export default function App() {
             <p style={{ fontSize: 12, color: theme.textMuted, marginTop: 4 }}>Track every rupee, together.</p>
           </div>
           {authError && <div style={{ background: `${theme.red}22`, border: `1px solid ${theme.red}`, color: theme.red, padding: "10px 12px", borderRadius: 10, fontSize: 12, fontWeight: 600, marginBottom: 16, textAlign: "center" }}>{authError}</div>}
+          {authSuccess && <div style={{ background: `${theme.green}22`, border: `1px solid ${theme.green}`, color: theme.green, padding: "10px 12px", borderRadius: 10, fontSize: 12, fontWeight: 600, marginBottom: 16, textAlign: "center" }}>{authSuccess}</div>}
           <form onSubmit={handleAuth} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {authMode === "register" && (
+              <div>
+                <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: theme.textMuted, marginBottom: 5, textTransform: "uppercase" }}>Name</label>
+                <input type="text" required value={nameInput} onChange={(e) => setNameInput(e.target.value)} placeholder="Your name" style={{ width: "100%", padding: "11px 12px", borderRadius: 10, border: `1px solid ${theme.border}`, background: theme.inputBg, color: theme.text, fontSize: 14, boxSizing: "border-box" }} />
+              </div>
+            )}
             <div>
               <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: theme.textMuted, marginBottom: 5, textTransform: "uppercase" }}>User ID</label>
               <input type="text" required value={usernameInput} onChange={(e) => setUsernameInput(e.target.value)} placeholder="Enter your ID" style={{ width: "100%", padding: "11px 12px", borderRadius: 10, border: `1px solid ${theme.border}`, background: theme.inputBg, color: theme.text, fontSize: 14, boxSizing: "border-box" }} />
@@ -376,15 +428,21 @@ export default function App() {
               <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: theme.textMuted, marginBottom: 5, textTransform: "uppercase" }}>Password</label>
               <input type="password" required value={passwordInput} onChange={(e) => setPasswordInput(e.target.value)} placeholder="••••••••" style={{ width: "100%", padding: "11px 12px", borderRadius: 10, border: `1px solid ${theme.border}`, background: theme.inputBg, color: theme.text, fontSize: 14, boxSizing: "border-box" }} />
             </div>
+            {authMode === "register" && (
+              <div>
+                <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: theme.textMuted, marginBottom: 5, textTransform: "uppercase" }}>Confirm Password</label>
+                <input type="password" required value={confirmPasswordInput} onChange={(e) => setConfirmPasswordInput(e.target.value)} placeholder="••••••••" style={{ width: "100%", padding: "11px 12px", borderRadius: 10, border: `1px solid ${theme.border}`, background: theme.inputBg, color: theme.text, fontSize: 14, boxSizing: "border-box" }} />
+              </div>
+            )}
             <button type="submit" style={{ background: theme.accent, color: "#fff", border: "none", borderRadius: 10, padding: "12px 0", fontSize: 14, fontWeight: 700, cursor: "pointer", marginTop: 6 }}>
               {authMode === "login" ? "Log In" : "Create Account"}
             </button>
           </form>
           <div style={{ marginTop: 20, textAlign: "center", fontSize: 12, color: theme.textMuted, borderTop: `1px solid ${theme.border}`, paddingTop: 16 }}>
             {authMode === "login" ? (
-              <p style={{ margin: 0 }}>New here? <button onClick={() => { setAuthMode("register"); setAuthError(""); }} style={{ background: "none", border: "none", color: theme.accent, fontWeight: 700, cursor: "pointer", padding: 0 }}>Create an account</button></p>
+              <p style={{ margin: 0 }}>New here? <button onClick={() => { setAuthMode("register"); setAuthError(""); setAuthSuccess(""); }} style={{ background: "none", border: "none", color: theme.accent, fontWeight: 700, cursor: "pointer", padding: 0 }}>Create an account</button></p>
             ) : (
-              <p style={{ margin: 0 }}>Already registered? <button onClick={() => { setAuthMode("login"); setAuthError(""); }} style={{ background: "none", border: "none", color: theme.accent, fontWeight: 700, cursor: "pointer", padding: 0 }}>Log in</button></p>
+              <p style={{ margin: 0 }}>Already registered? <button onClick={() => { setAuthMode("login"); setAuthError(""); setAuthSuccess(""); }} style={{ background: "none", border: "none", color: theme.accent, fontWeight: 700, cursor: "pointer", padding: 0 }}>Log in</button></p>
             )}
           </div>
         </div>
@@ -433,7 +491,7 @@ export default function App() {
                 <>
                   <div onClick={() => setShowProfileMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
                   <div style={{ position: "absolute", top: "calc(100% + 8px)", right: 0, background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 10, boxShadow: "0 10px 30px rgba(0,0,0,0.25)", zIndex: 70, overflow: "hidden", minWidth: 170 }}>
-                    <div style={{ padding: "10px 14px", fontSize: 11, color: theme.textMuted, borderBottom: `1px solid ${theme.border}` }}>Signed in as <strong style={{ color: theme.text }}>{currentUser}</strong></div>
+                    <div style={{ padding: "10px 14px", fontSize: 11, color: theme.textMuted, borderBottom: `1px solid ${theme.border}` }}>Signed in as <strong style={{ color: theme.text }}>{currentUserName()}</strong></div>
                     <button onClick={() => { setShowPeopleModal(true); setShowProfileMenu(false); }} style={{ width: "100%", padding: "10px 14px", border: "none", background: "none", textAlign: "left", fontSize: 12, fontWeight: 600, color: theme.text, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}><Users size={13} /> Manage People</button>
                     <button onClick={handleSignOut} style={{ width: "100%", padding: "10px 14px", border: "none", borderTop: `1px solid ${theme.border}`, background: "none", textAlign: "left", fontSize: 12, fontWeight: 600, color: theme.red, cursor: "pointer" }}>Sign Out</button>
                   </div>
@@ -512,6 +570,34 @@ export default function App() {
     );
   }
 
+  function DayNav({ value, onChange }) {
+    const isToday = value === todayStr();
+    const isYesterday = value === yesterdayStr();
+    return (
+      <div style={{ padding: "10px 16px", borderBottom: `1px solid ${theme.border}` }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+          <button onClick={() => onChange(shiftDate(value, -1))} style={{ background: "none", border: "none", color: theme.textMuted, cursor: "pointer", display: "flex" }}><ChevronLeft size={18} /></button>
+          <span style={{ fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}><Calendar size={13} /> {dayLabel(value)}</span>
+          <button onClick={() => onChange(shiftDate(value, 1))} disabled={isToday} style={{ background: "none", border: "none", color: isToday ? theme.border : theme.textMuted, cursor: isToday ? "default" : "pointer", display: "flex" }}><ChevronRight size={18} /></button>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => onChange(todayStr())} style={{ flex: 1, padding: "6px 0", borderRadius: 20, border: "none", fontSize: 11, fontWeight: 700, background: isToday ? theme.accent : theme.cardAlt, color: isToday ? "#fff" : theme.textMuted, cursor: "pointer" }}>Today</button>
+          <button onClick={() => onChange(yesterdayStr())} style={{ flex: 1, padding: "6px 0", borderRadius: 20, border: "none", fontSize: 11, fontWeight: 700, background: isYesterday ? theme.accent : theme.cardAlt, color: isYesterday ? "#fff" : theme.textMuted, cursor: "pointer" }}>Yesterday</button>
+          <input type="date" value={value} max={todayStr()} onChange={(e) => onChange(e.target.value)} style={{ flex: 1, padding: "6px 8px", borderRadius: 20, border: "none", background: theme.cardAlt, color: theme.text, fontSize: 11, fontWeight: 700, boxSizing: "border-box" }} />
+        </div>
+      </div>
+    );
+  }
+
+  function GlowCard({ color, children, style }) {
+    return (
+      <div style={{ position: "relative", overflow: "hidden", borderRadius: 18, padding: "16px 18px", background: `linear-gradient(135deg, ${theme.card} 0%, ${theme.cardAlt} 100%)`, border: `1px solid ${color}3D`, boxShadow: `0 8px 26px ${color}26`, ...style }}>
+        <div style={{ position: "absolute", top: -34, right: -24, width: 120, height: 120, borderRadius: "50%", background: color, opacity: 0.22, filter: "blur(32px)", pointerEvents: "none" }} />
+        <div style={{ position: "relative", zIndex: 1 }}>{children}</div>
+      </div>
+    );
+  }
+
   const rootStyle = { fontFamily: "'Inter', system-ui, sans-serif", background: theme.bg, minHeight: "100vh", color: theme.text, position: "relative" };
 
   // ============================= HOME SCREEN =============================
@@ -523,7 +609,7 @@ export default function App() {
         <TopBar />
         <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 16px 90px" }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: theme.textMuted, textTransform: "uppercase", marginBottom: 10, letterSpacing: 0.5 }}>Today's Spend</div>
-          <div style={{ background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 16, padding: "18px 18px" }}>
+          <GlowCard color={theme.accent}>
             <div style={{ fontSize: 30, fontWeight: 800 }}>{fmt(todayTotal)}</div>
             <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
               <div style={{ flex: 1, background: theme.cardAlt, borderRadius: 12, padding: "10px 12px", display: "flex", alignItems: "center", gap: 10 }}>
@@ -535,10 +621,10 @@ export default function App() {
                 <div><div style={{ fontSize: 11, color: theme.textMuted }}>Online</div><div style={{ fontSize: 14, fontWeight: 700 }}>{fmt(todayOnline)}</div></div>
               </div>
             </div>
-          </div>
+          </GlowCard>
 
           <div style={{ fontSize: 11, fontWeight: 700, color: theme.textMuted, textTransform: "uppercase", margin: "20px 0 10px", letterSpacing: 0.5 }}>This Month</div>
-          <div style={{ background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 16, padding: 16 }}>
+          <GlowCard color={theme.blue} style={{ padding: 16 }}>
             {homePieData.length === 0 ? (
               <div style={{ textAlign: "center", padding: "20px 0", color: theme.textMuted, fontSize: 13 }}>No expenses logged yet this month.</div>
             ) : (
@@ -566,7 +652,7 @@ export default function App() {
                 </div>
               </div>
             )}
-          </div>
+          </GlowCard>
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "20px 0 10px" }}>
             <span style={{ fontSize: 11, fontWeight: 700, color: theme.textMuted, textTransform: "uppercase", letterSpacing: 0.5 }}>Recent</span>
@@ -749,65 +835,138 @@ export default function App() {
   if (screen === "budget") {
     const cash = accountStats("Cash");
     const online = accountStats("Online");
+    const cashDay = dayAccountStats("Cash");
+    const onlineDay = dayAccountStats("Online");
     return (
       <div style={rootStyle}>
         <TopBar>
-          <MonthNav value={budgetMonth} onChange={setBudgetMonth} />
-        </TopBar>
-        <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 16px 90px" }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: theme.textMuted, textTransform: "uppercase", marginBottom: 8, letterSpacing: 0.5 }}>Monthly Overview</div>
-          <div style={{ background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 16, padding: "16px 18px", marginBottom: 16, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-            <div>
-              <div style={{ fontSize: 10, color: theme.green, fontWeight: 700, display: "flex", alignItems: "center", gap: 3 }}><TrendingUp size={11} /> RECEIVED</div>
-              <div style={{ fontSize: 17, fontWeight: 800, marginTop: 4 }}>{fmt(monthReceived)}</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 10, color: theme.red, fontWeight: 700, display: "flex", alignItems: "center", gap: 3 }}><TrendingDown size={11} /> SPENT</div>
-              <div style={{ fontSize: 17, fontWeight: 800, marginTop: 4 }}>{fmt(monthSpent)}</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 10, color: theme.textMuted, fontWeight: 700 }}>BALANCE</div>
-              <div style={{ fontSize: 17, fontWeight: 800, marginTop: 4, color: monthBalance >= 0 ? theme.green : theme.red }}>{fmt(monthBalance)}</div>
-            </div>
+          <div style={{ display: "flex", background: theme.cardAlt, borderRadius: 20, padding: 3, margin: "0 16px 10px" }}>
+            <button onClick={() => setBudgetView("Month")} style={{ flex: 1, padding: "7px 0", borderRadius: 18, border: "none", fontSize: 12, fontWeight: 700, background: budgetView === "Month" ? theme.accent : "transparent", color: budgetView === "Month" ? "#fff" : theme.textMuted, cursor: "pointer" }}>Month</button>
+            <button onClick={() => setBudgetView("Day")} style={{ flex: 1, padding: "7px 0", borderRadius: 18, border: "none", fontSize: 12, fontWeight: 700, background: budgetView === "Day" ? theme.accent : "transparent", color: budgetView === "Day" ? "#fff" : theme.textMuted, cursor: "pointer" }}>Day</button>
           </div>
+          {budgetView === "Month" ? <MonthNav value={budgetMonth} onChange={setBudgetMonth} /> : <DayNav value={budgetDay} onChange={setBudgetDay} />}
+        </TopBar>
 
-          {ACCOUNTS.map((a) => {
-            const stats = a.name === "Cash" ? cash : online;
-            const goal = accountGoals[a.name] || 0;
-            return (
-              <div key={a.name} style={{ background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 16, padding: "16px 18px", marginBottom: 14 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <div style={{ width: 34, height: 34, borderRadius: "50%", background: `${a.color}22`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>{a.emoji}</div>
-                    <span style={{ fontSize: 15, fontWeight: 700 }}>{a.name}</span>
-                  </div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button onClick={() => { setEditAccountModal(a.name); setEditAccountGoal(String(goal || "")); }} style={{ display: "flex", alignItems: "center", gap: 4, padding: "6px 12px", borderRadius: 20, border: `1px solid ${theme.border}`, background: theme.cardAlt, color: theme.text, fontSize: 11, fontWeight: 700, cursor: "pointer" }}><Edit3 size={11} /> Edit</button>
-                    <button onClick={() => setMoneyModalAccount(a.name)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "6px 12px", borderRadius: 20, border: "none", background: a.color, color: "#0E0E16", fontSize: 11, fontWeight: 800, cursor: "pointer" }}><Plus size={11} /> Add</button>
-                  </div>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
-                  <div style={{ background: theme.cardAlt, borderRadius: 10, padding: "8px 10px", textAlign: "center" }}>
-                    <div style={{ fontSize: 9, color: theme.textMuted, fontWeight: 700 }}>RECEIVED</div>
-                    <div style={{ fontSize: 13, fontWeight: 800, marginTop: 2 }}>{fmt(stats.received)}</div>
-                  </div>
-                  <div style={{ background: theme.cardAlt, borderRadius: 10, padding: "8px 10px", textAlign: "center" }}>
-                    <div style={{ fontSize: 9, color: theme.textMuted, fontWeight: 700 }}>SPENT</div>
-                    <div style={{ fontSize: 13, fontWeight: 800, marginTop: 2 }}>{fmt(stats.spent)}</div>
-                  </div>
-                  <div style={{ background: theme.cardAlt, borderRadius: 10, padding: "8px 10px", textAlign: "center" }}>
-                    <div style={{ fontSize: 9, color: theme.textMuted, fontWeight: 700 }}>BALANCE</div>
-                    <div style={{ fontSize: 13, fontWeight: 800, marginTop: 2, color: stats.balance >= 0 ? theme.green : theme.red }}>{fmt(stats.balance)}</div>
-                  </div>
-                </div>
-                <div style={{ height: 5, borderRadius: 4, background: theme.cardAlt, overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${stats.progress}%`, background: a.color, borderRadius: 4, transition: "width 0.3s ease" }} />
-                </div>
-                {goal > 0 && <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 6 }}>Goal: {fmt(goal)}</div>}
+        {budgetView === "Month" ? (
+          <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 16px 90px" }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: theme.textMuted, textTransform: "uppercase", marginBottom: 8, letterSpacing: 0.5 }}>Monthly Overview</div>
+            <GlowCard color={theme.accent} style={{ marginBottom: 16, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+              <div>
+                <div style={{ fontSize: 10, color: theme.green, fontWeight: 700, display: "flex", alignItems: "center", gap: 3 }}><TrendingUp size={11} /> RECEIVED</div>
+                <div style={{ fontSize: 17, fontWeight: 800, marginTop: 4 }}>{fmt(monthReceived)}</div>
               </div>
-            );
-          })}
-        </div>
+              <div>
+                <div style={{ fontSize: 10, color: theme.red, fontWeight: 700, display: "flex", alignItems: "center", gap: 3 }}><TrendingDown size={11} /> SPENT</div>
+                <div style={{ fontSize: 17, fontWeight: 800, marginTop: 4 }}>{fmt(monthSpent)}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: theme.textMuted, fontWeight: 700 }}>BALANCE</div>
+                <div style={{ fontSize: 17, fontWeight: 800, marginTop: 4, color: monthBalance >= 0 ? theme.green : theme.red }}>{fmt(monthBalance)}</div>
+              </div>
+            </GlowCard>
+
+            {ACCOUNTS.map((a) => {
+              const stats = a.name === "Cash" ? cash : online;
+              const goal = accountGoals[a.name] || 0;
+              return (
+                <GlowCard key={a.name} color={a.color} style={{ marginBottom: 14 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div style={{ width: 34, height: 34, borderRadius: "50%", background: `${a.color}22`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>{a.emoji}</div>
+                      <span style={{ fontSize: 15, fontWeight: 700 }}>{a.name}</span>
+                    </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => { setEditAccountModal(a.name); setEditAccountGoal(String(goal || "")); }} style={{ display: "flex", alignItems: "center", gap: 4, padding: "6px 12px", borderRadius: 20, border: `1px solid ${theme.border}`, background: theme.cardAlt, color: theme.text, fontSize: 11, fontWeight: 700, cursor: "pointer" }}><Edit3 size={11} /> Edit</button>
+                      <button onClick={() => setMoneyModalAccount(a.name)} style={{ display: "flex", alignItems: "center", gap: 4, padding: "6px 12px", borderRadius: 20, border: "none", background: a.color, color: "#0E0E16", fontSize: 11, fontWeight: 800, cursor: "pointer" }}><Plus size={11} /> Add</button>
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
+                    <div style={{ background: theme.cardAlt, borderRadius: 10, padding: "8px 10px", textAlign: "center" }}>
+                      <div style={{ fontSize: 9, color: theme.textMuted, fontWeight: 700 }}>RECEIVED</div>
+                      <div style={{ fontSize: 13, fontWeight: 800, marginTop: 2 }}>{fmt(stats.received)}</div>
+                    </div>
+                    <div style={{ background: theme.cardAlt, borderRadius: 10, padding: "8px 10px", textAlign: "center" }}>
+                      <div style={{ fontSize: 9, color: theme.textMuted, fontWeight: 700 }}>SPENT</div>
+                      <div style={{ fontSize: 13, fontWeight: 800, marginTop: 2 }}>{fmt(stats.spent)}</div>
+                    </div>
+                    <div style={{ background: theme.cardAlt, borderRadius: 10, padding: "8px 10px", textAlign: "center" }}>
+                      <div style={{ fontSize: 9, color: theme.textMuted, fontWeight: 700 }}>BALANCE</div>
+                      <div style={{ fontSize: 13, fontWeight: 800, marginTop: 2, color: stats.balance >= 0 ? theme.green : theme.red }}>{fmt(stats.balance)}</div>
+                    </div>
+                  </div>
+                  <div style={{ height: 5, borderRadius: 4, background: theme.cardAlt, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${stats.progress}%`, background: a.color, borderRadius: 4, transition: "width 0.3s ease" }} />
+                  </div>
+                  {goal > 0 && <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 6 }}>Goal: {fmt(goal)}</div>}
+                </GlowCard>
+              );
+            })}
+          </div>
+        ) : (
+          <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 16px 90px" }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: theme.textMuted, textTransform: "uppercase", marginBottom: 8, letterSpacing: 0.5 }}>Today's Pending Budget</div>
+            <GlowCard color={dayCombinedPending >= 0 ? theme.green : theme.red} style={{ marginBottom: 16, textAlign: "center" }}>
+              <div style={{ fontSize: 11, color: theme.textMuted, fontWeight: 700, textTransform: "uppercase", marginBottom: 6 }}>Pending for {dayLabel(budgetDay)}</div>
+              <div style={{ fontSize: 34, fontWeight: 800, color: dayCombinedPending >= 0 ? theme.green : theme.red }}>{fmt(dayCombinedPending)}</div>
+              <div style={{ display: "flex", justifyContent: "center", gap: 18, marginTop: 12, fontSize: 12, color: theme.textMuted }}>
+                <span>Allowance: <strong style={{ color: theme.text }}>{fmt(dayCombinedAllowance)}</strong></span>
+                <span>Spent: <strong style={{ color: theme.text }}>{fmt(daySpentTotal)}</strong></span>
+              </div>
+            </GlowCard>
+
+            <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+              {ACCOUNTS.map((a) => {
+                const stat = a.name === "Cash" ? cashDay : onlineDay;
+                return (
+                  <GlowCard key={a.name} color={a.color} style={{ flex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                      <div style={{ width: 28, height: 28, borderRadius: "50%", background: `${a.color}22`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14 }}>{a.emoji}</div>
+                      <span style={{ fontSize: 13, fontWeight: 700 }}>{a.name}</span>
+                    </div>
+                    <div style={{ fontSize: 9, color: theme.textMuted, fontWeight: 700 }}>PENDING</div>
+                    <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 8, color: stat.pending >= 0 ? theme.green : theme.red }}>{fmt(stat.pending)}</div>
+                    <div style={{ fontSize: 10, color: theme.textMuted }}>Allowance {fmt(stat.dailyAllowance)}</div>
+                    <div style={{ fontSize: 10, color: theme.textMuted }}>Spent {fmt(stat.spent)}</div>
+                  </GlowCard>
+                );
+              })}
+            </div>
+
+            <div style={{ fontSize: 11, fontWeight: 700, color: theme.textMuted, textTransform: "uppercase", margin: "4px 0 10px", letterSpacing: 0.5 }}>That Day's Expenses</div>
+            {dayEntries.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "40px 0", color: theme.textMuted, fontSize: 13, background: theme.card, border: `1px dashed ${theme.border}`, borderRadius: 12 }}>No expenses on this day.</div>
+            ) : (
+              <>
+                <GlowCard color={theme.blue} style={{ marginBottom: 12 }}>
+                  {dayCatBreakdown.map(([cat, amt]) => {
+                    const c = catInfo(cat);
+                    return (
+                      <div key={cat} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 0" }}>
+                        <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: theme.text }}><span style={{ fontSize: 15 }}>{c.emoji}</span>{cat}</span>
+                        <span style={{ fontSize: 12, fontWeight: 700 }}>{fmt(amt)}</span>
+                      </div>
+                    );
+                  })}
+                </GlowCard>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {dayEntries.map((e) => {
+                    const c = catInfo(e.category);
+                    return (
+                      <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", background: theme.card, border: `1px solid ${theme.border}`, borderRadius: 14 }}>
+                        <div style={{ width: 34, height: 34, borderRadius: "50%", background: `${c.color}22`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>{c.emoji}</div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 700 }}>{e.category}</div>
+                          <div style={{ fontSize: 11, color: e.account === "Cash" ? theme.green : theme.blue, fontWeight: 700 }}>{(e.account || "Online").toUpperCase()}</div>
+                        </div>
+                        <div style={{ fontSize: 14, fontWeight: 700 }}>{fmt(e.amount)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        )}
         <BottomNav />
         <PeopleModal />
 
@@ -842,6 +1001,7 @@ export default function App() {
       </div>
     );
   }
+
 
   // ============================= CREDIT (LENDING) SCREEN =============================
   if (screen === "credit") {
